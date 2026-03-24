@@ -1,0 +1,116 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: chat
+      POSTGRES_PASSWORD: chatpass
+      POSTGRES_DB: chatdb
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    command: >
+      postgres
+        -c max_connections=200
+        -c shared_buffers=256MB
+        -c effective_cache_size=768MB
+        -c work_mem=4MB
+        -c maintenance_work_mem=64MB
+        -c checkpoint_completion_target=0.9
+        -c wal_buffers=16MB
+        -c random_page_cost=1.1
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chat -d chatdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: >
+      redis-server
+        --maxmemory 256mb
+        --maxmemory-policy allkeys-lru
+        --tcp-keepalive 60
+        --hz 20
+        --save ""
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://chat:chatpass@db:5432/chatdb
+      REDIS_URL: redis://redis:6379
+      SECRET_KEY: supersecretkey_change_in_production
+      ACCESS_TOKEN_EXPIRE_MINUTES: "30"
+      REFRESH_TOKEN_EXPIRE_DAYS: "30"
+      UPLOAD_DIR: /app/uploads
+      MAX_FILE_SIZE_MB: "20"
+      MAX_IMAGE_SIZE_MB: "3"
+    volumes:
+      - uploads_data:/app/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: >
+      celery -A app.worker.celery_app worker
+        --loglevel=info
+        --queues=messages,presence,files,notifications,default
+        --concurrency=4
+        --without-heartbeat
+        --without-gossip
+        --without-mingle
+    environment:
+      DATABASE_URL: postgresql+asyncpg://chat:chatpass@db:5432/chatdb
+      REDIS_URL: redis://redis:6379
+      SECRET_KEY: supersecretkey_change_in_production
+      UPLOAD_DIR: /app/uploads
+      MAX_FILE_SIZE_MB: "20"
+      MAX_IMAGE_SIZE_MB: "3"
+    volumes:
+      - uploads_data:/app/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "8000:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - uploads_data:/app/uploads:ro
+    depends_on:
+      - backend
+      - frontend
+
+volumes:
+  postgres_data:
+  redis_data:
+  uploads_data:

@@ -1,0 +1,17 @@
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+uvloop==0.21.0
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+alembic==1.14.0
+redis[hiredis]==5.2.1
+pydantic[email]==2.10.3
+pydantic-settings==2.6.1
+python-jose[cryptography]==3.3.0
+passlib[argon2]==1.7.4
+python-multipart==0.0.17
+aiofiles==24.1.0
+Pillow==11.0.0
+psycopg2-binary==2.9.10
+celery==5.4.0
+kombu==5.3.4
