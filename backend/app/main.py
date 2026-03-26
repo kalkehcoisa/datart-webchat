@@ -1,13 +1,14 @@
-import time
 import logging
+import time
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, Response
+
+from fastapi import FastAPI, Query, Request, Response, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import WebSocket, Query
-from app.api.v1.endpoints import auth, rooms, messages, friends, files, users
+
+from app.api.v1.endpoints import auth, files, friends, messages, rooms, users
+from app.db.redis import close_redis, get_redis
 from app.websocket.handler import websocket_handler
 from app.websocket.manager import manager
-from app.db.redis import get_redis, close_redis
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +25,12 @@ app = FastAPI(title="WebChat", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost", "http://localhost:80", "http://localhost:5173"],
+    allow_origins=[
+        "http://localhost",
+        "http://localhost:8000",
+        "http://localhost:80",
+        "http://localhost:5173",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -43,7 +49,11 @@ async def rate_limit_middleware(request: Request, call_next):
         results = await pipe.execute()
         count = results[0]
         if count > 20:
-            return Response(content='{"detail":"Too many requests"}', status_code=429, media_type="application/json")
+            return Response(
+                content='{"detail":"Too many requests"}',
+                status_code=429,
+                media_type="application/json",
+            )
     return await call_next(request)
 
 
