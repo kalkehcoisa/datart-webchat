@@ -46,7 +46,7 @@ pytest tests/ -v
 Browser
   │
   ▼
-Nginx (port 80)
+Nginx (port 8000)
   ├── /api/*       → FastAPI (uvicorn, 4 workers)
   ├── /ws          → FastAPI WebSocket
   ├── /uploads/*   → Static file serving
