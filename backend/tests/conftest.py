@@ -1,19 +1,20 @@
 import asyncio
 import os
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 import pytest_asyncio
-from httpx import AsyncClient, ASGITransport
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from unittest.mock import patch, AsyncMock, MagicMock
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379")
 os.environ.setdefault("SECRET_KEY", "test-secret-key-not-for-production")
 
-from app.main import app
+from app.core.security import create_access_token, hash_password
 from app.db.session import Base, get_db
-from app.core.security import hash_password, create_access_token
-from app.models.models import User, Room, RoomMember, Friendship, PersonalChat, Message
+from app.main import app
+from app.models.models import Friendship, Message, PersonalChat, Room, RoomMember, User
 
 TEST_DB_URL = "sqlite+aiosqlite:///:memory:"
 
@@ -40,26 +41,29 @@ def _make_redis_mock():
 
 
 @pytest.fixture(scope="session")
-def event_loop():
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
-
-
-@pytest_asyncio.fixture(scope="session")
-async def engine():
+def engine():
     engine = create_async_engine(TEST_DB_URL, echo=False)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+
+    async def init_models():
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+    async def drop_models():
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.drop_all)
+
+    asyncio.run(init_models())
     yield engine
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-    await engine.dispose()
+    asyncio.run(drop_models())
+
+    asyncio.run(engine.dispose())
 
 
 @pytest_asyncio.fixture
 async def db(engine):
-    session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    session_factory = async_sessionmaker(
+        engine, expire_on_commit=False, class_=AsyncSession
+    )
     async with session_factory() as session:
         yield session
         await session.rollback()
@@ -67,6 +71,8 @@ async def db(engine):
 
 @pytest_asyncio.fixture
 async def client(db):
+    import tempfile
+
     async def override_get_db():
         yield db
 
@@ -74,31 +80,46 @@ async def client(db):
 
     redis_mock = _make_redis_mock()
 
-    with patch("app.db.redis._redis", redis_mock), \
-         patch("app.db.redis.get_redis", new=AsyncMock(return_value=redis_mock)), \
-         patch("app.main.get_redis", new=AsyncMock(return_value=redis_mock)), \
-         patch("app.core.cache.get_redis", new=AsyncMock(return_value=redis_mock)), \
-         patch("app.api.v1.endpoints.messages.broadcast_message") as _bm, \
-         patch("app.api.v1.endpoints.messages.process_attachment") as _pa, \
-         patch("app.api.v1.endpoints.messages.notify_user") as _nu_msg, \
-         patch("app.api.v1.endpoints.rooms.broadcast_message") as _rm, \
-         patch("app.api.v1.endpoints.rooms.notify_user") as _nu_room, \
-         patch("app.api.v1.endpoints.friends.notify_user") as _nu_fr, \
-         patch("app.api.v1.endpoints.friends.broadcast_presence") as _bp, \
-         patch("app.websocket.handler.broadcast_presence") as _bp_ws, \
-         patch("app.websocket.manager.manager.startup", new=AsyncMock()), \
-         patch("app.websocket.manager.manager.shutdown", new=AsyncMock()):
-
+    with (
+        tempfile.TemporaryDirectory() as tmp_upload_dir,
+        patch("app.api.v1.endpoints.messages.settings") as mock_msg_settings,
+        patch("app.api.v1.endpoints.files.settings") as mock_file_settings,
+        patch("app.db.redis._redis", redis_mock),
+        patch("app.db.redis.get_redis", new=AsyncMock(return_value=redis_mock)),
+        patch("app.main.get_redis", new=AsyncMock(return_value=redis_mock)),
+        patch("app.core.cache.get_redis", new=AsyncMock(return_value=redis_mock)),
+        patch("app.api.v1.endpoints.messages.broadcast_message") as _bm,
+        patch("app.api.v1.endpoints.messages.process_attachment") as _pa,
+        patch("app.api.v1.endpoints.messages.notify_user") as _nu_msg,
+        patch("app.api.v1.endpoints.rooms.broadcast_message") as _rm,
+        patch("app.api.v1.endpoints.rooms.notify_user") as _nu_room,
+        patch("app.api.v1.endpoints.friends.notify_user") as _nu_fr,
+        patch("app.api.v1.endpoints.friends.broadcast_presence") as _bp,
+        patch("app.websocket.handler.broadcast_presence") as _bp_ws,
+        patch("app.websocket.manager.manager.startup", new=AsyncMock()),
+        patch("app.websocket.manager.manager.shutdown", new=AsyncMock()),
+    ):
         for m in [_bm, _pa, _nu_msg, _rm, _nu_room, _nu_fr, _bp, _bp_ws]:
             m.delay = MagicMock()
 
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        from app.core.config import settings as real_settings
+
+        mock_msg_settings.UPLOAD_DIR = tmp_upload_dir
+        mock_msg_settings.MAX_FILE_SIZE_MB = real_settings.MAX_FILE_SIZE_MB
+        mock_msg_settings.MAX_IMAGE_SIZE_MB = real_settings.MAX_IMAGE_SIZE_MB
+        mock_file_settings.UPLOAD_DIR = tmp_upload_dir
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as ac:
             yield ac
 
     app.dependency_overrides.clear()
 
 
-async def create_user(db: AsyncSession, username: str, email: str, password: str = "password123") -> User:
+async def create_user(
+    db: AsyncSession, username: str, email: str, password: str = "password123"
+) -> User:
     user = User(username=username, email=email, password_hash=hash_password(password))
     db.add(user)
     await db.commit()
